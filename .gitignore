@@ -28,6 +28,7 @@ out/
 coverage/
 *.pyc
 venv/
+.pytest_cache/
 target/
 *.o
 *.obj

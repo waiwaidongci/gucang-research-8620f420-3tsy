@@ -74,6 +74,19 @@ npm run build
 
 目录：`backend/src/{config,constants,models,schemas,services,controllers,routes,middlewares,utils}`；`backend/scripts/seed_demo.py`；`backend/migrations/`；`frontend/src/{api,stores,types,components/common,hooks,pages,router,utils,constants}`。`migrations/001_initial.sql` 说明首次启动 metadata 建表策略；本地演示未配 Alembic 增量升级，修改模型前应规划迁移。
 
+### 并发执行与失败重试的验证
+
+规则计算落在 `backend/src/services/run_execution.py`，`worker.py` 仅保留 Celery 入口（任务名仍是 `basket.analyze`，`POST /runs` 入口不变）。同一条研究（run）由“按 run id 的跨进程锁 + 数据库行级 CAS 领取”双重串行化：已成功的研究是终态，迟到或重复的尝试直接跳过，不会改写状态、规则结果或结果文件；结果文件经临时文件 `fsync` 后原子替换，失败路径仅在确认未成功时清理，使状态、规则结果与结果文件对应同一次成功计算；计算或写文件中断后可重试完成，被硬杀遗留的 `running` 状态可被下一次投递安全接管；提案保存的是规则快照，重试与重复执行都不会改动规则依据。
+
+```sh
+cd backend
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements-dev.txt
+pytest                       # 24 个用例，默认用文件型 SQLite，无需 PostgreSQL/Redis
+```
+
+`backend/tests/` 覆盖：成功后迟到失败尝试不可覆盖、交错重复派发只有一次计算、8 执行者并发竞争、锁被旁路时的终态 CAS 底线、计算/写文件中断后的重试、SIGKILL 遗留 `running` 的接管、永久失败（空批次等）不触发 Celery 重试、有界重试退避、提案规则快照保持原样，以及 `POST /runs` 入口与队列不可用的端到端路径。PostgreSQL 咨询锁分支通过伪连接单独验证。
+
 环境变量见 `.env.example`：COMPOSE_PROJECT_NAME 隔离栈名；FRONTEND_PORT/BACKEND_PORT/DB_PORT 映射端口；POSTGRES_DB/USER/PASSWORD 配置库；JWT_SECRET 签名；SEED_DEMO 控制启动 seed。Compose 恰好 frontend/backend/worker/db/redis 5 个服务，全具健康检查，worker 使用定向 Celery ping。db-data、redis-data 与 artifacts 命名卷分别持久化库、队列、计算 JSON；API 与 worker 共享 artifacts。Nginx `/api/` 剥离前缀，API 原生路由不带 `/api`。
 
 请求 ID 与全局错误两个中间件输出可追踪错误；数据库审计记录登录、导入、入队、完成及审核。所有 SQL 通过 ORM 绑定。CSV 字段对公式前缀转义。JWT 密钥及数据库口令为本地演示值；部署前应通过环境变量替换。
